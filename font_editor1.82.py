@@ -2,10 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 フォントエディタ - 高解像度ビットマップフォント制作ツール
-Version: 1.82.1
+Version: 1.82.2
 Last Updated: 2025-11-05
 
 変更履歴:
+- v1.82.2 (2025-11-05): 偏旁取り込み機能の改善
+  * 「本体へ取り込み」ボタンでフォルダ選択ダイアログを表示
+  * 取り込み元フォルダをユーザーが選択できるように改善
+  * .pngファイルの有無を確認して警告を表示
+  * 取り込み完了メッセージにフォルダパスを表示
+
 - v1.82.1 (2025-11-05): バグ修正
   * 偏旁抽出ツールの「本体へ取り込み」機能が動作しない問題を修正
   * 古い実装が新しい実装を上書きしていたバインディングを修正（4857-4858行目）
@@ -4677,17 +4683,36 @@ def _fe_open_parts_editor_safe(self) -> None:
         if getattr(self, "_is_importing_parts", False): return
         self._is_importing_parts = True
         try:
-            out_dir = None
+            # 推奨フォルダを取得
+            suggested_dir = None
             if hasattr(gui, "get_output_dir"):
-                try: out_dir = gui.get_output_dir()
-                except Exception: out_dir = None
-            if not out_dir: out_dir = default_out
+                try: suggested_dir = gui.get_output_dir()
+                except Exception: pass
+            if not suggested_dir: suggested_dir = default_out
+
+            # ユーザーにフォルダを選択してもらう
+            out_dir = filedialog.askdirectory(
+                title="偏旁ファイルが保存されているフォルダを選択",
+                initialdir=suggested_dir if os.path.isdir(suggested_dir) else os.path.dirname(self.project.font_path)
+            )
+
+            if not out_dir:  # キャンセルされた場合
+                self._is_importing_parts = False
+                return
+
+            # 選択されたフォルダに.pngファイルがあるか確認
+            png_files = [f for f in os.listdir(out_dir) if f.lower().endswith('.png')]
+            if not png_files:
+                if not messagebox.askyesno("確認", f"選択されたフォルダに.pngファイルが見つかりません。\n\nフォルダ: {out_dir}\n\nそれでも続行しますか？"):
+                    self._is_importing_parts = False
+                    return
+
             count = self._import_parts_from_folder(out_dir) if hasattr(self, "_import_parts_from_folder") else 0
             _save_editor_state_from_gui(self)
             if hasattr(self, "_open_parts_palette_nospawn"): self._open_parts_palette_nospawn()
-            messagebox.showinfo("取り込み完了", f"偏旁を {count} 件 取り込みました")
+            messagebox.showinfo("取り込み完了", f"偏旁を {count} 件 取り込みました\n\nフォルダ: {out_dir}")
         except Exception as e:
-            messagebox.showerror("取り込みエラー", f"偏旁の取り込みに失敗しました。\\n{e}")
+            messagebox.showerror("取り込みエラー", f"偏旁の取り込みに失敗しました。\n{e}")
         finally:
             self._is_importing_parts = False
     tk.Button(top, text="本体へ取り込み", command=_import_back).pack(side="bottom", pady=6)
