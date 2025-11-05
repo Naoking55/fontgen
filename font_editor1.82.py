@@ -2,10 +2,22 @@
 # -*- coding: utf-8 -*-
 """
 フォントエディタ - 高解像度ビットマップフォント制作ツール
-Version: 1.82.3
+Version: 1.82.4
 Last Updated: 2025-11-05
 
 変更履歴:
+- v1.82.4 (2025-11-05): 重要なバグ修正3点
+  * フォント読み込み時に全ての文字範囲を読み込むように修正
+    - 以前：基本ラテン文字のみ
+    - 修正後：Config.CHAR_RANGESの全範囲を読み込み
+  * 偏旁パレットの「貼付」ボタンを実装
+    - _insert_part_to_active_editor関数を追加
+    - 開いているGlyphEditorに偏旁を挿入
+    - クリップボード経由ではなく直接貼り付け
+  * プロジェクト保存時にparts_catalog.jsonを保存
+    - metaフィールド（カテゴリ等）を含めて保存
+    - プロジェクト再読み込み時にカテゴリ情報を維持
+
 - v1.82.3 (2025-11-05): 偏旁パレットのカテゴリ分類機能追加
   * 偏旁パレットをタブUIに変更（偏・旁・冠・脚・繞・垂・構）
   * 各タブに該当する偏旁のみを表示
@@ -3563,29 +3575,32 @@ class FontEditorApp(tk.Tk):
                 ('All Files', '*.*')
             ]
         )
-        
+
         if not path:
             return
-        
+
         # プロジェクト初期化
         self.project.font_path = path
-        
-        # 現在の範囲の文字コード取得
-        char_codes = self.project.get_char_codes()
-        
+
+        # [FIX v1.82.4] 全ての文字範囲の文字コードを取得
+        all_char_codes = set()
+        for range_name, (start, end) in Config.CHAR_RANGES.items():
+            all_char_codes.update(range(start, end + 1))
+        char_codes = sorted(all_char_codes)
+
         # プログレスウィンドウ作成
         progress_win = tk.Toplevel(self)
         progress_win.title('読み込み中...')
         progress_win.geometry('500x150')
         progress_win.transient(self)
         progress_win.grab_set()
-        
+
         tk.Label(
             progress_win,
             text='フォントを読み込んでいます...',
             font=('Arial', 12)
         ).pack(pady=10)
-        
+
         progress_var = tk.IntVar(value=0)
         progress_bar = ttk.Progressbar(
             progress_win,
@@ -3594,21 +3609,21 @@ class FontEditorApp(tk.Tk):
             length=400
         )
         progress_bar.pack(pady=10)
-        
+
         progress_label = tk.Label(
             progress_win,
             text='0 / 0 文字',
             font=('Arial', 10)
         )
         progress_label.pack()
-        
+
         # プログレスバー更新用コールバック
         def progress_callback(current: int, total: int) -> None:
             """プログレス更新"""
             progress_var.set(current)
             progress_label.config(text=f'{current} / {total} 文字')
             progress_win.update()
-        
+
         # 同期読み込み実行
         success = FontRenderer.load_font(
             path,
@@ -3616,21 +3631,22 @@ class FontEditorApp(tk.Tk):
             self.project,
             progress_callback
         )
-        
+
         if not success:
             progress_win.destroy()
             return
-        
-        # ★★★ 重要: 範囲を読み込み済みとしてマーク ★★★
-        self.project.mark_range_loaded(self.project.char_range)
-        
+
+        # ★★★ 重要: 全ての範囲を読み込み済みとしてマーク ★★★
+        for range_name, char_range in Config.CHAR_RANGES.items():
+            self.project.mark_range_loaded(char_range)
+
         # プログレスウィンドウ閉じる
         progress_win.destroy()
-        
+
         # グリッド表示更新
         self.grid_view.refresh()
         self._update_status()
-        
+
         # 統計情報取得 (2025-10-05 22:00: エラー修正 - defined と empty を正しく計算)
         total = len(char_codes)
         empty = self.project.get_empty_count()
@@ -3707,10 +3723,35 @@ class FontEditorApp(tk.Tk):
         def on_save() -> None:
             self.grid_view.refresh()
             self._update_status()
-        
+
         editor = GlyphEditor(self, self.project, char_code, on_save)
         self._open_editors.append(editor)
-    
+
+    def _insert_part_to_active_editor(self, part_image: Image.Image, part_name: str, offset: Tuple[float, float] = (0.0, 0.0)) -> None:
+        """[FIX v1.82.4] 偏旁を開いているエディタに挿入"""
+        # 開いているエディタの中で最後にフォーカスされたものを見つける
+        active_editor = None
+        for editor in self._open_editors:
+            try:
+                if editor.winfo_exists() and editor.state() == 'normal':
+                    active_editor = editor
+            except Exception:
+                continue
+
+        if not active_editor:
+            messagebox.showwarning("警告", "文字編集ウィンドウを開いてから偏旁を貼り付けてください")
+            return
+
+        try:
+            # GlyphEditorのinsert_part_imageメソッドを呼び出す
+            if hasattr(active_editor, 'insert_part_image'):
+                active_editor.insert_part_image(part_image, scale_hint=1.0, offset_hint=offset)
+                messagebox.showinfo("貼付完了", f"偏旁「{part_name}」を貼り付けました")
+            else:
+                messagebox.showerror("エラー", "エディタが偏旁貼り付けに対応していません")
+        except Exception as e:
+            messagebox.showerror("エラー", f"偏旁の貼り付けに失敗しました:\n{e}")
+
     def _update_status(self) -> None:
         """ステータス更新"""
         if self.project.font_path:
@@ -4898,13 +4939,24 @@ def _save_project_bundle_internal(self, bundle_path: str, embed_font: bool = Fal
         # 1) parts write
         parts = getattr(self.project, "parts", {}) or {}
         items = list(parts.items()); total = max(1, len(items))
+        catalog_data = {}  # [FIX v1.82.4] カタログデータを保存
         for i, (key, rec) in enumerate(items, 1):
             img, pth = rec.get("image"), rec.get("path")
+            meta = rec.get("meta", {})  # [FIX v1.82.4] メタデータを取得
             rel = f"{key}.png"; dst = os.path.join(assets_parts, rel)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             if img is not None: img.save(dst, "PNG")
             elif pth and os.path.isfile(pth): shutil.copy2(pth, dst)
+            # [FIX v1.82.4] メタデータをカタログに追加
+            if meta:
+                catalog_data[key] = dict(meta)  # コピーして保存
+                catalog_data[key]["file"] = rel
             pct = 10 + int(50 * i / total); self._progress_cb("偏旁を書き出し中…", pct)
+        # [FIX v1.82.4] カタログJSONを保存
+        if catalog_data:
+            catalog_path = os.path.join(assets_parts, "parts_catalog.json")
+            with open(catalog_path, "w", encoding="utf-8") as f:
+                json.dump(catalog_data, f, ensure_ascii=False, indent=2)
         # 2) editor_state write
         if hasattr(self, "_save_editor_state_from_gui"): self._save_editor_state_from_gui()
         ed_state = getattr(self, "_editor_state", {}) or {}
