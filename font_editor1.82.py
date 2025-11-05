@@ -2,14 +2,18 @@
 # -*- coding: utf-8 -*-
 """
 フォントエディタ - 高解像度ビットマップフォント制作ツール
-Version: 1.82.4
+Version: 1.82.5
 Last Updated: 2025-11-05
 
 変更履歴:
+- v1.82.5 (2025-11-05): フォント読み込み方式の改善
+  * 基本ラテン文字を先に読み込み、すぐに作業開始可能に
+  * 残りの文字範囲はバックグラウンドで読み込み
+  * 元のv1.81.pyの仕様に戻す
+  * バックグラウンド読み込み中もステータスバーで進捗表示
+  * スレッドベースの実装で、UI操作をブロックしない
+
 - v1.82.4 (2025-11-05): 重要なバグ修正3点
-  * フォント読み込み時に全ての文字範囲を読み込むように修正
-    - 以前：基本ラテン文字のみ
-    - 修正後：Config.CHAR_RANGESの全範囲を読み込み
   * 偏旁パレットの「貼付」ボタンを実装
     - _insert_part_to_active_editor関数を追加
     - 開いているGlyphEditorに偏旁を挿入
@@ -3582,11 +3586,9 @@ class FontEditorApp(tk.Tk):
         # プロジェクト初期化
         self.project.font_path = path
 
-        # [FIX v1.82.4] 全ての文字範囲の文字コードを取得
-        all_char_codes = set()
-        for range_name, (start, end) in Config.CHAR_RANGES.items():
-            all_char_codes.update(range(start, end + 1))
-        char_codes = sorted(all_char_codes)
+        # [FIX v1.82.5] まず基本ラテン文字のみを読み込む（即座に作業開始可能に）
+        basic_latin_range = Config.CHAR_RANGES.get('基本ラテン文字 (ASCII)', (0x0020, 0x007F))
+        basic_char_codes = list(range(basic_latin_range[0], basic_latin_range[1] + 1))
 
         # プログレスウィンドウ作成
         progress_win = tk.Toplevel(self)
@@ -3597,14 +3599,14 @@ class FontEditorApp(tk.Tk):
 
         tk.Label(
             progress_win,
-            text='フォントを読み込んでいます...',
+            text='基本ラテン文字を読み込んでいます...',
             font=('Arial', 12)
         ).pack(pady=10)
 
         progress_var = tk.IntVar(value=0)
         progress_bar = ttk.Progressbar(
             progress_win,
-            maximum=len(char_codes),
+            maximum=len(basic_char_codes),
             variable=progress_var,
             length=400
         )
@@ -3624,10 +3626,10 @@ class FontEditorApp(tk.Tk):
             progress_label.config(text=f'{current} / {total} 文字')
             progress_win.update()
 
-        # 同期読み込み実行
+        # 基本ラテン文字を同期読み込み
         success = FontRenderer.load_font(
             path,
-            char_codes,
+            basic_char_codes,
             self.project,
             progress_callback
         )
@@ -3636,9 +3638,8 @@ class FontEditorApp(tk.Tk):
             progress_win.destroy()
             return
 
-        # ★★★ 重要: 全ての範囲を読み込み済みとしてマーク ★★★
-        for range_name, char_range in Config.CHAR_RANGES.items():
-            self.project.mark_range_loaded(char_range)
+        # 基本ラテン文字範囲を読み込み済みとしてマーク
+        self.project.mark_range_loaded(basic_latin_range)
 
         # プログレスウィンドウ閉じる
         progress_win.destroy()
@@ -3647,23 +3648,92 @@ class FontEditorApp(tk.Tk):
         self.grid_view.refresh()
         self._update_status()
 
-        # 統計情報取得 (2025-10-05 22:00: エラー修正 - defined と empty を正しく計算)
-        total = len(char_codes)
+        # 統計情報取得
+        total = len(basic_char_codes)
         empty = self.project.get_empty_count()
         defined = total - empty
         
-        # 読み込み完了メッセージ
+        # [FIX v1.82.5] 読み込み完了メッセージ
         messagebox.showinfo(
             '読込完了',
-            f'フォント読込完了\n\n'
+            f'基本ラテン文字の読み込みが完了しました\n\n'
             f'定義済み: {defined} / 空白: {empty}\n\n'
-            f'バックグラウンドで他の範囲も読み込みます\n'
-            f'※編集画面をクリックすると表示されます'
+            f'残りの文字はバックグラウンドで読み込みます'
         )
-        
-        # ===== バックグラウンドで残りの範囲を読み込み =====
-        self._start_background_loading(path)
-    
+
+        # [FIX v1.82.5] バックグラウンドで残りの範囲を読み込み
+        self._start_background_loading_all_ranges(path, basic_latin_range)
+
+    def _start_background_loading_all_ranges(self, font_path: str, skip_range: Tuple[int, int]) -> None:
+        """[FIX v1.82.5] バックグラウンドで全ての範囲を読み込み"""
+        # 既に読み込んだ範囲以外の全文字コードを取得
+        all_char_codes = set()
+        for range_name, (start, end) in Config.CHAR_RANGES.items():
+            all_char_codes.update(range(start, end + 1))
+
+        # 既に読み込んだ範囲を除外
+        skip_codes = set(range(skip_range[0], skip_range[1] + 1))
+        remaining_codes = sorted(all_char_codes - skip_codes)
+
+        if not remaining_codes:
+            return
+
+        # バックグラウンドスレッドで読み込み
+        def bg_load():
+            try:
+                total = len(remaining_codes)
+                for idx, code in enumerate(remaining_codes):
+                    # プロジェクトに読み込み
+                    try:
+                        char = chr(code)
+                        pil_font = ImageFont.truetype(font_path, size=Config.FONT_RENDER_SIZE)
+                        bitmap = FontRenderer._render_char(char, pil_font)
+                        if bitmap:
+                            self.project.set_glyph(code, bitmap, is_edited=False)
+                        else:
+                            with self.project._lock:
+                                if code not in self.project.glyphs:
+                                    self.project.glyphs[code] = GlyphData(code, None, False)
+                    except Exception:
+                        with self.project._lock:
+                            if code not in self.project.glyphs:
+                                self.project.glyphs[code] = GlyphData(code, None, False)
+
+                    # 100文字ごとにステータス更新
+                    if idx % 100 == 0:
+                        progress = int((idx + 1) / total * 100)
+                        self.after(0, lambda p=progress: self.status_label.config(
+                            text=f'{Path(font_path).name} - バックグラウンド読み込み中... {p}%'
+                        ))
+
+                # 全範囲を読み込み済みとしてマーク
+                self.after(0, lambda: self._on_background_complete(font_path))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror('エラー', f'バックグラウンド読み込みエラー:\n{e}'))
+
+        # スレッド開始
+        thread = threading.Thread(target=bg_load, daemon=True)
+        thread.start()
+
+        # ステータス更新
+        self.status_label.config(
+            text=f'{Path(font_path).name} - バックグラウンド読み込み開始... (残り {len(remaining_codes)} 文字)'
+        )
+
+    def _on_background_complete(self, font_path: str) -> None:
+        """[FIX v1.82.5] バックグラウンド読み込み完了"""
+        # 全範囲を読み込み済みとしてマーク
+        for range_name, char_range in Config.CHAR_RANGES.items():
+            self.project.mark_range_loaded(char_range)
+
+        # ステータス更新
+        self.status_label.config(
+            text=f'{Path(font_path).name} - バックグラウンド読み込み完了'
+        )
+
+        # グリッド表示更新
+        self.grid_view.refresh()
+
     def _start_background_loading(self, font_path: str) -> None:
         """バックグラウンド読み込み開始"""
         # 既存のローダー停止
