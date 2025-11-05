@@ -2,10 +2,18 @@
 # -*- coding: utf-8 -*-
 """
 フォントエディタ - 高解像度ビットマップフォント制作ツール
-Version: 1.82.2
+Version: 1.82.3
 Last Updated: 2025-11-05
 
 変更履歴:
+- v1.82.3 (2025-11-05): 偏旁パレットのカテゴリ分類機能追加
+  * 偏旁パレットをタブUIに変更（偏・旁・冠・脚・繞・垂・構）
+  * 各タブに該当する偏旁のみを表示
+  * 偏旁抽出時にカテゴリ情報をcatalog.jsonに保存
+  * 取り込み時にカテゴリ情報を正しく読み込み
+  * 配置情報（左・右・上・下など）を表示
+  * 視認性向上のため各偏旁アイテムに枠を追加
+
 - v1.82.2 (2025-11-05): 偏旁取り込み機能の改善
   * 「本体へ取り込み」ボタンでフォルダ選択ダイアログを表示
   * 取り込み元フォルダをユーザーが選択できるように改善
@@ -4044,7 +4052,20 @@ def _import_parts_from_folder_impl(self, folder: str) -> None:
     if os.path.exists(catalog_path):
         import json
         with open(catalog_path, 'r', encoding='utf-8') as f:
-            catalog = json.load(f)
+            nested_catalog = json.load(f)
+            # ネストされたカタログをフラット化
+            for category, parts_in_cat in nested_catalog.items():
+                if isinstance(parts_in_cat, dict):
+                    for part_name, part_meta in parts_in_cat.items():
+                        # ファイル名からキーを生成（category_partname_char形式）
+                        if isinstance(part_meta, dict):
+                            file_name = part_meta.get("file", "")
+                            if file_name:
+                                key = os.path.splitext(file_name)[0]
+                                catalog[key] = part_meta
+                                # カテゴリ情報を確実に含める
+                                if "category" not in catalog[key]:
+                                    catalog[key]["category"] = category
     parts = {}
     for name in os.listdir(folder):
         if not name.lower().endswith('.png'):
@@ -4575,6 +4596,29 @@ def _apply_editor_state_to_gui(self, gui):
 def _import_parts_from_folder(self, folder: str) -> int:
     if not os.path.isdir(folder):
         raise FileNotFoundError(folder)
+
+    # カタログ読み込み
+    catalog = {}
+    catalog_path = os.path.join(folder, "parts_catalog.json")
+    if os.path.exists(catalog_path):
+        try:
+            with open(catalog_path, 'r', encoding='utf-8') as f:
+                nested_catalog = json.load(f)
+                # ネストされたカタログをフラット化
+                for category, parts_in_cat in nested_catalog.items():
+                    if isinstance(parts_in_cat, dict):
+                        for part_name, part_meta in parts_in_cat.items():
+                            if isinstance(part_meta, dict):
+                                file_name = part_meta.get("file", "")
+                                if file_name:
+                                    key = os.path.splitext(file_name)[0]
+                                    catalog[key] = part_meta
+                                    # カテゴリ情報を確実に含める
+                                    if "category" not in catalog[key]:
+                                        catalog[key]["category"] = category
+        except Exception:
+            pass
+
     picked: Dict[str, Dict] = {}
     for root, _, files in os.walk(folder):
         for name in files:
@@ -4583,7 +4627,9 @@ def _import_parts_from_folder(self, folder: str) -> int:
             key  = os.path.splitext(os.path.relpath(path, folder))[0]
             try: img = Image.open(path).convert("RGBA")
             except Exception: continue
-            picked[key] = {"image": img, "path": path, "w": img.width, "h": img.height}
+            # カタログからメタデータを取得
+            meta = catalog.get(key, {})
+            picked[key] = {"image": img, "path": path, "w": img.width, "h": img.height, "meta": meta}
     if not hasattr(self.project, "parts") or self.project.parts is None:
         self.project.parts = {}
     self.project.parts.update(picked)
@@ -4596,37 +4642,125 @@ class _InternalPartsPalette(tk.Toplevel):
     def __init__(self, master, project, insert_cb):
         super().__init__(master); self.title("偏旁パレット")
         self.project = project; self.insert_cb = insert_cb
-        self.geometry("420x560")
-        wrap = tk.Frame(self); wrap.pack(fill="both", expand=True)
-        self.canvas = tk.Canvas(wrap, highlightthickness=0)
-        sb = tk.Scrollbar(wrap, orient="vertical", command=self.canvas.yview)
-        self.inner = tk.Frame(self.canvas)
-        self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        self.canvas.create_window((0,0), window=self.inner, anchor="nw")
-        self.canvas.configure(yscrollcommand=sb.set)
-        self.canvas.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
-        self._tkimgs = {}; self.refresh()
+        self.geometry("480x600")
+
+        # カテゴリ名のマッピング
+        self.category_names = {
+            "hen": "偏（へん）",
+            "tsukuri": "旁（つくり）",
+            "kanmuri": "冠（かんむり）",
+            "ashi": "脚（あし）",
+            "nyou": "繞（にょう）",
+            "tare": "垂（たれ）",
+            "kamae": "構（かまえ）",
+            "other": "その他"
+        }
+
+        # タブUIの作成
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # 各カテゴリ用のフレームとキャンバスを保持
+        self.tab_frames = {}
+        self.tab_canvases = {}
+        self.tab_inner_frames = {}
+
+        self._tkimgs = {}
+        self.refresh()
+
     def refresh(self):
-        for w in list(self.inner.children.values()):
-            try: w.destroy()
-            except Exception: pass
+        # 既存のタブをクリア
+        for tab in self.notebook.tabs():
+            self.notebook.forget(tab)
         self._tkimgs.clear()
+        self.tab_frames.clear()
+        self.tab_canvases.clear()
+        self.tab_inner_frames.clear()
+
         parts = getattr(self.project, "parts", None) or {}
         order = getattr(self.project, "parts_order", None) or list(parts.keys())
+
         if not order:
-            tk.Label(self.inner, text="（偏旁が読み込まれていません）").pack(pady=12); return
-        for i, key in enumerate(order):
-            data = parts.get(key) or {}; img = data.get("image")
+            empty_frame = tk.Frame(self.notebook)
+            self.notebook.add(empty_frame, text="空")
+            tk.Label(empty_frame, text="（偏旁が読み込まれていません）").pack(pady=12)
+            return
+
+        # カテゴリごとに偏旁を分類
+        categorized = {cat: [] for cat in self.category_names.keys()}
+
+        for key in order:
+            data = parts.get(key) or {}
+            img = data.get("image")
             if img is None: continue
-            scale = max(img.width, img.height) or 1
-            tw = max(1, int(img.width*(160.0/scale))); th = max(1, int(img.height*(160.0/scale)))
-            tkimg = ImageTk.PhotoImage(img.resize((tw, th)))
-            self._tkimgs[key] = tkimg
-            row = tk.Frame(self.inner, padx=4, pady=4); row.grid(row=i, column=0, sticky="w")
-            tk.Label(row, image=tkimg).grid(row=0, column=0, rowspan=2, padx=6)
-            tk.Label(row, text=key).grid(row=0, column=1, sticky="w")
-            def _do_insert(k=key, im=img): return lambda: self.insert_cb(im, k, (0,0))
-            tk.Button(row, text="貼付", command=_do_insert()).grid(row=1, column=1, sticky="w", pady=2)
+
+            # メタデータからカテゴリを取得
+            meta = data.get("meta", {})
+            category = meta.get("category", "other")
+
+            # カテゴリが存在しない場合は「その他」へ
+            if category not in categorized:
+                category = "other"
+
+            categorized[category].append((key, img, meta))
+
+        # 各カテゴリのタブを作成
+        for cat_id, cat_name in self.category_names.items():
+            items = categorized.get(cat_id, [])
+            if not items:
+                continue  # 空のカテゴリはスキップ
+
+            # タブフレーム作成
+            tab_frame = tk.Frame(self.notebook)
+            self.tab_frames[cat_id] = tab_frame
+            self.notebook.add(tab_frame, text=f"{cat_name} ({len(items)})")
+
+            # スクロール可能なキャンバス作成
+            canvas = tk.Canvas(tab_frame, highlightthickness=0)
+            scrollbar = tk.Scrollbar(tab_frame, orient="vertical", command=canvas.yview)
+            inner = tk.Frame(canvas)
+
+            inner.bind("<Configure>", lambda e, c=canvas: c.configure(scrollregion=c.bbox("all")))
+            canvas.create_window((0, 0), window=inner, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+
+            canvas.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+
+            self.tab_canvases[cat_id] = canvas
+            self.tab_inner_frames[cat_id] = inner
+
+            # 偏旁を配置
+            for i, (key, img, meta) in enumerate(items):
+                scale = max(img.width, img.height) or 1
+                tw = max(1, int(img.width * (120.0 / scale)))
+                th = max(1, int(img.height * (120.0 / scale)))
+                tkimg = ImageTk.PhotoImage(img.resize((tw, th)))
+                self._tkimgs[key] = tkimg
+
+                row = tk.Frame(inner, padx=4, pady=4, relief="ridge", borderwidth=1)
+                row.grid(row=i, column=0, sticky="ew", padx=4, pady=2)
+
+                # 画像
+                tk.Label(row, image=tkimg).grid(row=0, column=0, rowspan=2, padx=6)
+
+                # 名前とメタ情報
+                name_label = tk.Label(row, text=key, font=("", 10, "bold"))
+                name_label.grid(row=0, column=1, sticky="w")
+
+                # split情報があれば表示
+                split_info = meta.get("split", "")
+                if split_info:
+                    split_text = {"left": "左", "right": "右", "top": "上", "bottom": "下",
+                                 "left_bottom": "左下", "top_left": "左上", "frame": "囲み"}.get(split_info, split_info)
+                    info_label = tk.Label(row, text=f"配置: {split_text}", font=("", 8), fg="gray")
+                    info_label.grid(row=1, column=1, sticky="w")
+
+                # 貼付ボタン
+                def _do_insert(k=key, im=img):
+                    return lambda: self.insert_cb(im, k, (0, 0))
+                btn = tk.Button(row, text="貼付", command=_do_insert())
+                btn.grid(row=0, column=2, rowspan=2, padx=6)
 
 def _open_parts_palette_nospawn(self):
     pal_cls = globals().get("PartsPalette") or _InternalPartsPalette
@@ -5445,7 +5579,8 @@ def extract_all_parts(font_path, output_dir, progress_callback=None, log_callbac
                     "sample": part_info["sample"],
                     "file": filename,
                     "split": part_info["split"],
-                    "ratio": part_info.get("ratio", 0.5)
+                    "ratio": part_info.get("ratio", 0.5),
+                    "category": category  # カテゴリ情報を追加
                 }
             else:
                 log(f"{msg} ... ❌ {error}")
