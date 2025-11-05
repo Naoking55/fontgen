@@ -2,10 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 フォントエディタ - 高解像度ビットマップフォント制作ツール
-Version: 1.82
+Version: 1.82.1
 Last Updated: 2025-11-05
 
 変更履歴:
+- v1.82.1 (2025-11-05): バグ修正
+  * 偏旁抽出ツールの「本体へ取り込み」機能が動作しない問題を修正
+  * 古い実装が新しい実装を上書きしていたバインディングを修正（4857-4858行目）
+  * 取り込み完了時に件数を表示するメッセージが正しく表示されるように修正
+
 - v1.82 (2025-11-05): コード整理とブラッシュアップ
   * 重複コード削除（9362行→6408行、31.5%削減）
   * Block構造明確化（本体BLOCK1-12、オプションOPTION1）
@@ -4854,11 +4859,12 @@ if __name__ == '__main__':
 
 
 # === [INTEGRATED] bind methods to FontEditorApp ===
-FontEditorApp._open_parts_editor = _wrap(_open_parts_editor_impl)  # type: ignore
-FontEditorApp._open_parts_palette = _wrap(_open_parts_palette_impl)  # type: ignore
+# [FIX v1.82.1] Commented out old bindings - use new implementations from PATCH-A (line 4691-4693)
+# FontEditorApp._open_parts_editor = _wrap(_open_parts_editor_impl)  # type: ignore
+# FontEditorApp._open_parts_palette = _wrap(_open_parts_palette_impl)  # type: ignore
 # expose helpers (not UI)
 FontEditorApp._get_parts_output_dir = _get_parts_output_dir_impl  # type: ignore
-FontEditorApp._import_parts_from_folder = _import_parts_from_folder  # type: ignore  # [FIX] prefer counting importer
+# FontEditorApp._import_parts_from_folder = _import_parts_from_folder  # type: ignore  # [FIX] prefer counting importer (already bound at line 4693)
 
 
 # ===== [INTEGRATED-PARTS] BEGIN =====
