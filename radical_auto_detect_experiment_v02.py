@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-偏旁自動検出実験プログラム v0.2.0
-Version: 0.2.0
+偏旁自動検出実験プログラム v0.2.1
+Version: 0.2.1
 Last Updated: 2025-11-06
 
-新機能:
+v0.2.1 更新内容:
+- macOS SSL証明書エラーの自動解決機能
+- 手動ダウンロードファイル（ids_raw.txt）対応
+- より詳細なエラーメッセージと解決方法の表示
+
+新機能（v0.2.0）:
 1. Unicode IDS (Ideographic Description Sequences) データベースを使用した構造分析
 2. 辞書ベースの偏旁検出（部首データベース参照）
 3. 複数文字から共通偏旁を抽出する改良版アルゴリズム
@@ -29,6 +34,8 @@ from scipy import ndimage
 from typing import List, Tuple, Optional, Dict, Set
 import json
 import urllib.request
+import urllib.error
+import ssl
 import re
 from collections import defaultdict
 
@@ -52,6 +59,7 @@ class Config:
 
     # IDSデータキャッシュ
     IDS_CACHE_FILE = "ids_cache.json"
+    IDS_MANUAL_FILE = "ids_raw.txt"  # 手動ダウンロードしたファイル
     IDS_SOURCE_URL = "https://raw.githubusercontent.com/cjkvi/cjkvi-ids/master/ids.txt"
 
 
@@ -85,6 +93,7 @@ class IDSDatabase:
 
     def _load_or_download(self):
         """IDSデータをロードまたはダウンロード"""
+        # 1. キャッシュから読み込み
         if os.path.exists(Config.IDS_CACHE_FILE):
             try:
                 with open(Config.IDS_CACHE_FILE, 'r', encoding='utf-8') as f:
@@ -94,38 +103,103 @@ class IDSDatabase:
             except Exception as e:
                 print(f"キャッシュ読み込みエラー: {e}")
 
-        # ダウンロードして解析
+        # 2. 手動ダウンロードファイルから読み込み
+        if os.path.exists(Config.IDS_MANUAL_FILE):
+            print(f"手動ダウンロードファイル ({Config.IDS_MANUAL_FILE}) を検出しました")
+            try:
+                self._parse_from_file(Config.IDS_MANUAL_FILE)
+                return
+            except Exception as e:
+                print(f"手動ファイル読み込みエラー: {e}")
+
+        # 3. インターネットからダウンロード
         self._download_and_parse()
+
+    def _parse_from_file(self, file_path: str):
+        """ファイルからIDSデータを解析"""
+        print(f"IDSデータを解析中: {file_path}")
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # 解析
+        for line in content.split('\n'):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+
+            parts = line.split('\t')
+            if len(parts) >= 3:
+                # U+XXXX, character, IDS
+                char = parts[1]
+                ids = parts[2]
+                self.ids_data[char] = ids
+
+        # キャッシュに保存
+        with open(Config.IDS_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(self.ids_data, f, ensure_ascii=False, indent=2)
+
+        print(f"IDSデータを取得しました: {len(self.ids_data)} エントリ")
 
     def _download_and_parse(self):
         """IDSデータをダウンロードして解析"""
         print("IDSデータをダウンロード中...")
+
+        # まず通常のダウンロードを試みる
         try:
             with urllib.request.urlopen(Config.IDS_SOURCE_URL, timeout=30) as response:
                 content = response.read().decode('utf-8')
+            self._parse_content(content)
+            return
+        except urllib.error.URLError as e:
+            if 'CERTIFICATE_VERIFY_FAILED' in str(e):
+                print("⚠️  SSL証明書エラーが発生しました")
+                print("解決方法:")
+                print("  1. macOS: /Applications/Python 3.*/Install Certificates.command を実行")
+                print("  2. または: pip3 install --upgrade certifi")
+                print("  3. または: 手動ダウンロード:")
+                print(f"     curl -o {Config.IDS_MANUAL_FILE} {Config.IDS_SOURCE_URL}")
+                print("")
+                print("SSL検証を無効化して再試行します...")
 
-            # 解析
-            for line in content.split('\n'):
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-
-                parts = line.split('\t')
-                if len(parts) >= 3:
-                    # U+XXXX, character, IDS
-                    char = parts[1]
-                    ids = parts[2]
-                    self.ids_data[char] = ids
-
-            # キャッシュに保存
-            with open(Config.IDS_CACHE_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.ids_data, f, ensure_ascii=False, indent=2)
-
-            print(f"IDSデータを取得しました: {len(self.ids_data)} エントリ")
-
+                # SSL検証を無効化して再試行
+                try:
+                    import ssl
+                    context = ssl._create_unverified_context()
+                    with urllib.request.urlopen(Config.IDS_SOURCE_URL, timeout=30, context=context) as response:
+                        content = response.read().decode('utf-8')
+                    self._parse_content(content)
+                    print("✅ SSL検証無効化でダウンロード成功")
+                    return
+                except Exception as e2:
+                    print(f"❌ SSL検証無効化でもダウンロード失敗: {e2}")
+            else:
+                print(f"❌ IDSダウンロードエラー: {e}")
         except Exception as e:
-            print(f"IDSダウンロードエラー: {e}")
-            print("オフラインモードで動作します")
+            print(f"❌ IDSダウンロードエラー: {e}")
+
+        print("")
+        print("⚠️  オフラインモードで動作します")
+        print("辞書ベース検出は使用できません。連結成分分析のみ利用可能です。")
+
+    def _parse_content(self, content: str):
+        """コンテンツを解析してIDSデータを抽出"""
+        for line in content.split('\n'):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+
+            parts = line.split('\t')
+            if len(parts) >= 3:
+                # U+XXXX, character, IDS
+                char = parts[1]
+                ids = parts[2]
+                self.ids_data[char] = ids
+
+        # キャッシュに保存
+        with open(Config.IDS_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(self.ids_data, f, ensure_ascii=False, indent=2)
+
+        print(f"✅ IDSデータを取得しました: {len(self.ids_data)} エントリ")
 
     def get_structure(self, char: str) -> Optional[Dict]:
         """
@@ -655,12 +729,12 @@ class ConnectedComponentAnalyzer:
 # ========================================
 
 class RadicalDetectionExperiment(tk.Tk):
-    """偏旁自動検出実験GUI v0.2.0"""
+    """偏旁自動検出実験GUI v0.2.1"""
 
     def __init__(self):
         super().__init__()
 
-        self.title("偏旁自動検出実験プログラム v0.2.0")
+        self.title("偏旁自動検出実験プログラム v0.2.1")
         self.geometry("1400x900")
 
         # データベース初期化

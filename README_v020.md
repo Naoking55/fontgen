@@ -137,24 +137,77 @@ python radical_auto_detect_experiment_v02.py
 - 実験手順
 - 技術的詳細
 
-## ⚠️ 既知の問題
+## ⚠️ トラブルシューティング
 
-1. **tkinterが使えない環境**
-   - Linux: `sudo apt-get install python3-tk`
-   - macOS: 通常は標準搭載
-   - Windows: 通常は標準搭載
+### 1. SSL証明書エラー (macOS)
 
-2. **IDSデータのダウンロードに失敗する場合**
-   - インターネット接続を確認
-   - ファイアウォールの設定を確認
-   - 手動ダウンロード: https://raw.githubusercontent.com/cjkvi/cjkvi-ids/master/ids.txt
-   - ダウンロード後、同じフォルダに配置
+**症状:**
+```
+IDSダウンロードエラー: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED]>
+オフラインモードで動作します
+```
 
-3. **一部の文字でIDS情報がない**
-   - 旧字体や異体字で欠落している場合がある
-   - その場合は連結成分分析を使用
+**解決方法A: Python証明書をインストール（推奨）**
+
+```bash
+# 方法1: Install Certificates.commandを実行
+open /Applications/Python\ 3.*/
+# 「Install Certificates.command」をダブルクリック
+
+# 方法2: コマンドラインから
+/Applications/Python\ 3.*/Install\ Certificates.command
+
+# 方法3: certifiを更新
+pip3 install --upgrade certifi
+```
+
+**解決方法B: 手動ダウンロード（最も確実）**
+
+プログラムと同じフォルダで以下を実行:
+
+```bash
+# IDSデータを手動ダウンロード
+curl -o ids_raw.txt https://raw.githubusercontent.com/cjkvi/cjkvi-ids/master/ids.txt
+
+# プログラムを再実行
+python3 radical_auto_detect_experiment0.20.py
+```
+
+プログラムは自動的に `ids_raw.txt` を検出して使用します。
+
+**解決方法C: SSL検証を無効化（v0.2.1以降は自動）**
+
+v0.2.1以降では、SSL証明書エラーが発生した場合、自動的にSSL検証を無効化して再試行します。
+
+### 2. tkinterが使えない環境
+
+- **Linux**: `sudo apt-get install python3-tk`
+- **macOS**: 通常は標準搭載
+- **Windows**: 通常は標準搭載
+
+### 3. IDSデータのダウンロードに失敗する場合
+
+- インターネット接続を確認
+- ファイアウォールの設定を確認
+- 上記「解決方法B: 手動ダウンロード」を使用
+
+### 4. 一部の文字でIDS情報がない
+
+- 旧字体や異体字で欠落している場合がある
+- その場合は「🧩 連結成分分析」を使用
+
+### 5. オフラインモードで辞書ベース検出を使いたい
+
+一度でもダウンロードに成功すれば、`ids_cache.json` が作成されます。
+このファイルがあれば、以降はオフラインで辞書ベース検出が使えます。
 
 ## 🔄 バージョン履歴
+
+### v0.2.1 (2025-11-06) - SSL証明書エラー対応
+- **macOS SSL証明書エラーの自動解決**
+- SSL証明書エラー時に自動的にSSL検証を無効化して再試行
+- 手動ダウンロードファイル（ids_raw.txt）対応
+- より詳細なエラーメッセージと解決方法の表示
 
 ### v0.2.0 (2025-11-06) - 辞書ベースアプローチ
 - Unicode IDS データベース統合
